@@ -1463,9 +1463,22 @@ class myPacket():
                                 nodes[other].packet.interf_mw[node.nodeid] -= this_mw_this_dev
 
 
+# determines belonging to a same cluster
+def same_cluster(devid,other_devid):
+    node = nodes[devid]
+    other = nodes[other_devid]
+
+    if node.cluster not in [-1,-2]:# cluster -1 is the no-cluster, -2 is the cluster of externals
+        if node.cluster==other.cluster:
+            return True
+    return False
+
+
 # compute the CAD prob of success (true positive) 
-def get_CAD_prob(distance,txpower):
-    return(CAD_diplos[txpower][round(distance)-1])
+def get_CAD_prob(distance,txpower,in_same_cluster=False):
+    if in_same_cluster:
+        return(CAD_diplos[txpower][1][round(distance)-1])
+    return(CAD_diplos[txpower][0][round(distance)-1])
 
 # pre-simulate the CAD proba of success as the smoothed reception rate of 100 packets at each meter and interpolated
 # depends on propa variables and lora params
@@ -1497,31 +1510,37 @@ def prepare_diplo(loss_per_building, aper, sf, bw):
         else:
             CAD_gamma_EDs += gamma_ED+CAD_gamma_ED_delta
 
-        Lpl = constants.Lpld0 + 10*CAD_gamma_EDs*np.log10(distances/constants.d0)
 
-        CAD_Prx = np.clip(-1000,txp,txp + constants.GL - Lpl - noise - rayleigh - buildings_atten)
+        diplos[txp] = {}
+        for intra_cluster_scenario in [0,1]:
 
-        # 
-        predicted_PDRs = np.count_nonzero((CAD_Prx>get_sensitivity(sf,bw,receiver_type="DEVICE")),axis=1)
 
-        # >>> scipy.version.version : '1.6.2' requires window_length to be odd, not version 1.12.0 anymore
-        window_length = max(50,int(2.2*maxDist/20))
-        if window_length%2==0:
-            window_length+=1
+            Lpl = constants.Lpld0 + 10*(CAD_gamma_EDs-intra_cluster_gamma_gain*intra_cluster_scenario)*np.log10(distances/constants.d0)
 
-        y = savgol_filter(predicted_PDRs, window_length, 2)
+            CAD_Prx = np.clip(-1000,txp,txp + constants.GL - Lpl - noise - rayleigh - buildings_atten)
 
-        if max(y)<100:
-            y=y/max(y)*100.1
-        
-        val_id=0
-        while y[val_id]<100:
-            y[val_id] = 101
-            val_id+=1
+            # 
+            predicted_PDRs = np.count_nonzero((CAD_Prx>get_sensitivity(sf,bw,receiver_type="DEVICE")),axis=1)
 
-        y = np.clip(y,a_min=0, a_max=100)
+            # >>> scipy.version.version : '1.6.2' requires window_length to be odd, not version 1.12.0 anymore
+            window_length = max(50,int(2.2*maxDist/20))
+            if window_length%2==0:
+                window_length+=1
 
-        diplos[txp] = y
+            y = savgol_filter(predicted_PDRs, window_length, 2)
+
+            if max(y)<100:
+                y=y/max(y)*100.1
+            
+            val_id=0
+            while y[val_id]<100:
+                y[val_id] = 101
+                val_id+=1
+
+            y = np.clip(y,a_min=0, a_max=100)
+
+            diplos[txp][intra_cluster_scenario] = y
+
     return diplos
 
 
@@ -1541,12 +1560,12 @@ def stop_CAD(nodeid,on_air_at_CAD_start):
         if devid in on_air_at_CAD_start:
             if var_CAD_prob: #general case 
                 if full_distances:
-                    if rng.random()*100 <= get_CAD_prob(distance_matrix[nodeid][devid],nodes[devid].packet.txpow):
+                    if rng.random()*100 <= get_CAD_prob(distance_matrix[nodeid][devid],nodes[devid].packet.txpow,same_cluster(nodeid,devid)):
                         if log_events:
                             MainLogger.info((nodeid,"CAD+",env.now))
                         return (True)
                 else:
-                    if rng.random()*100 <= get_CAD_prob(nodes[nodeid].dist_to_center,nodes[devid].packet.txpow):
+                    if rng.random()*100 <= get_CAD_prob(nodes[nodeid].dist_to_center,nodes[devid].packet.txpow,same_cluster(nodeid,devid)):
                         if log_events:
                             MainLogger.info((nodeid,"CAD+",env.now))                        
                         return (True)                    
