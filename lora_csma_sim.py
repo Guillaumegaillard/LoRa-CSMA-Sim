@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 ######################### Core module of the LoRa-CSMA-Sim Simulator #######################################################
 ######################### https://github.com/Guillaumegaillard/LoRa-CSMA-Sim ###############################################
-######################### 2025-04-10 #######################################################################################
+######################### 2025-07-08 #######################################################################################
 ######################### License MIT: #####################################################################################
 ######################### https://github.com/Guillaumegaillard/LoRa-CSMA-Sim/blob/main/LICENSE #############################
 ######################### Inspired from LoRaSim https://mcbor.github.io/lorasim/ ###########################################
@@ -623,12 +623,21 @@ class myNode():
         self.avail_chans = [i for i in range(len(constants.Channel_list))]
 
         # channel is randomly initialized
-        self.ch = rng.choice(self.avail_chans)
+        
+        self.channel_sequence = self.avail_chans[:]
+        rng.shuffle(self.channel_sequence)
+
+        # self.ch = rng.choice(self.avail_chans)
+        self.ch = self.channel_sequence[0]
         self.channel_just_changed = True
-        self.last_tx_ch = -1
+        self.last_tx_ch_seq_id = -1
 
         # channels tried and found busy
-        self.failed_chans = []
+        # self.failed_chans = []
+        self.failed_chans = 0
+
+        # channels previously used for transmission (max size is tx_memory)
+        self.transmitted_black_list = []
 
         # time required for configuring the radio to a given channel
         self.radio_config_time = radio_config_time #5 #ms
@@ -923,31 +932,42 @@ class myNode():
 
 
 
-
     # node function to update the channel to which radio is tuned
     # does not yield any delay here (see main "communicate" loop)
     # return False if no new channel is available
-    def update_channel(self):
-        self.failed_chans.append(self.ch)
+    def update_channel(self,limited_changes=False,max_changes=len(constants.Channel_list),after_fail=False):
+        
+        if after_fail:
+            self.failed_chans += 1
 
-        non_failed_chans = [i for i in self.avail_chans if (i not in self.failed_chans)]
-        if len(non_failed_chans)>0:
-            self.ch = rng.choice(non_failed_chans)
-            return(True)
-        else:
+        if limited_changes and self.failed_chans == max_changes: #all channels have been listened
             return(False)
+
+        skip_black_listed = 0
+        found_chan = False
+
+        while (skip_black_listed < len(constants.Channel_list) and not found_chan):
+            candidate = self.channel_sequence[(self.last_tx_ch_seq_id+1+self.failed_chans+skip_black_listed)%len(constants.Channel_list)]
+            if candidate in self.transmitted_black_list:
+                skip_black_listed += 1
+            else:
+                self.ch = candidate
+                found_chan = True
+
+        # self.ch = self.channel_sequence[(self.last_tx_ch_seq_id+1+self.failed_chans)%len(constants.Channel_list)]
+        # return(True)
+        return(found_chan)
 
 
     # node function to update/reset the list of available channels
     def update_available_channels(self):
-        if len(self.avail_chans) == 1:
-            self.avail_chans = [i for i in range(len(constants.Channel_list))]
-        if len(self.avail_chans) > 1:
-            # self.avail_chans = [i for i in self.avail_chans if i!=self.ch]
-            self.avail_chans = [i for i in self.avail_chans if i!=self.last_tx_ch]
+        self.failed_chans = 0
 
-        self.failed_chans = []
-
+        if len(self.transmitted_black_list) > tx_blacklist_memory:
+            if tx_blacklist_update_strategy == "shift":
+                self.transmitted_black_list = self.transmitted_black_list[1:]
+            elif tx_blacklist_update_strategy == "empty_but_last": #"shift"
+                self.transmitted_black_list = [self.transmitted_black_list[-1]]
 
         
     # node function called (in CANL) at beginning of listen phase
@@ -1752,15 +1772,10 @@ def communicate(env,node):
 
                                 if channel_found_busy: # DIFS went busy
                                     if profiles[node.profile]["CH_DIFS"]: #TODO: new proto xCH_CAD+BO
-                                        if node.update_channel():
+                                        if node.update_channel(limited_changes=True, after_fail=True):
                                             yield env.timeout(node.radio_config_time)
                                             node.radio_config_number += 1
-                                        else: # no change possible, break anyway, but before, reset avail chan
-                                            
-                                            # TODO: is it really better to maintain difs discarded chans?
-                                            # currently: only reset if doing NAV/CH & retry
-
-                                            # if profiles[node.profile]["CH_DIFS"]
+                                        else: # all channels have been trialed, go NAV
                                             # node.update_available_channels() 
 
                                             break # while
@@ -2081,7 +2096,7 @@ def communicate(env,node):
 
                 if node.n_retry > 0:
                     if node.nav_period>profiles[node.profile]["CANL22_MAX_NAV_x_chan_threshold"]:
-                        if node.update_channel():
+                        if node.update_channel(limited_changes=True, after_fail=True):
                             #printnode.nodeid, "change chan", env.now)
                             node.channel_just_changed = True
                             yield env.timeout(node.radio_config_time)
@@ -2286,8 +2301,10 @@ def communicate(env,node):
                 node.packet.processed = 0
                 node.packet.lost = False
                 node.packet.repropagate()
+
+                node.last_tx_ch_seq_id = node.channel_sequence.index(node.ch)
+                node.transmitted_black_list.append(node.ch)
                 node.update_available_channels()
-                node.last_tx_ch = node.ch
                 if node.update_channel():
                     node.channel_just_changed = True
                     yield env.timeout(node.radio_config_time)
@@ -2431,8 +2448,10 @@ def communicate(env,node):
                 node.packet.processed = 0
                 node.packet.lost = False
                 node.packet.repropagate()
+                node.last_tx_ch_seq_id = node.channel_sequence.index(node.ch)
+                node.transmitted_black_list.append(node.ch)
                 node.update_available_channels()
-                node.last_tx_ch = node.ch                
+                # node.last_tx_ch_seq_id = node.ch                
                 if node.update_channel():
                     yield env.timeout(node.radio_config_time)
                     node.radio_config_number +=1
@@ -2504,8 +2523,8 @@ def communicate(env,node):
                                 # yield env.timeout(node.packet.symTime*profiles[node.profile]["DIFS_inter_CAD_sym"])
 
                             if channel_found_busy: # DIFS went busy
-                                if profiles[node.profile]["CH_DIFS"]: #TODO: new proto xCH_CAD+BO
-                                    if node.update_channel():
+                                if profiles[node.profile]["CH_DIFS"]: #TODO: currently false <=> x==1, true <=> x==8
+                                    if node.update_channel(limited_changes=True, after_fail=True):
                                         yield env.timeout(node.radio_config_time)
                                         node.radio_config_number += 1
                                     else: # no change possible, break anyway, but before, reset avail chan
@@ -2682,12 +2701,15 @@ def communicate(env,node):
                 if channel_found_busy:
                     if profiles[node.profile]["CA_Change_Channel"]:
                         if node.n_retry > 0:
-                            if node.update_channel():
+                            # print("{0}: {1}: {2}".format(env.now, node.nodeid, node.n_retry),file=sys.stderr)
+                            if node.update_channel(limited_changes=True, after_fail=True):
+                            # if node.update_channel():
                                 yield env.timeout(node.radio_config_time)
                                 node.radio_config_number += 1
                             else:
                                 broken_by_lack_of_channels = True
                                 break # go aloha
+                                        
 
 
             # end of big while
@@ -2799,7 +2821,10 @@ def communicate(env,node):
                 node.packet.repropagate()     
                 
                 # node.update_available_channels()
-                node.last_tx_ch = node.ch
+                node.last_tx_ch_seq_id = node.channel_sequence.index(node.ch)
+                node.transmitted_black_list.append(node.ch)
+                node.update_available_channels()
+                # node.last_tx_ch_seq_id = node.ch
                 if node.update_channel():
                     yield env.timeout(node.radio_config_time)
                     node.radio_config_number +=1
@@ -2856,6 +2881,10 @@ def main_with_params(params):
     global GW_sensitivity_gain # GW are more sensible than devices => delta in dB
     global radio_config_time #5 #ms
     global radio_wake_up_time #5 #ms
+    global tx_blacklist_memory # max size of black list 
+    global tx_blacklist_update_strategy # how to update black list,   "empty_but_last" #"shift"
+
+
 
 
             ######### Distribution&Traffic properties ################
@@ -3023,6 +3052,9 @@ def main_with_params(params):
 
     radio_config_time = params["radio_config_time"] if "radio_config_time" in params else 5 #ms
     radio_wake_up_time = params["radio_wake_up_time"] if "radio_wake_up_time" in params else 5 #ms
+
+    tx_blacklist_memory = params["tx_blacklist_memory"] if "tx_blacklist_memory" in params else len(constants.Channel_list)
+    tx_blacklist_update_strategy = params["tx_blacklist_update_strategy"] if "tx_blacklist_update_strategy" in params else "empty_but_last" #"shift"
 
     maxBSReceives = 8
     avgSendTime = params["avgSendTime"]
